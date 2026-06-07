@@ -5,4 +5,4 @@ An extension for SillyTavern that provides a customizable tracking feature to mo
 ## Documentation
 
 The documentation can be found [here](https://github.com/kaldigo/SillyTavern-Tracker/blob/main/docs/Tracker%20Documentation.pdf).  
-All credit for the documentation goes to Giglio for putting it together!
+All credit for the documentation goes to Giglio and Kaldigo for putting it together!
