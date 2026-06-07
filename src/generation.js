@@ -81,39 +81,60 @@ async function changeProfileAndCompletionPreset(profileName, completionPresetNam
 }
 
 /**
+ * Guards against concurrent generateTracker() calls.
+ * Prevents the cascade where concurrent calls race through
+ * changeProfileAndCompletionPreset() (which executes /profile <name>,
+ * aborting any in-flight API request), causing rapid-fire API
+ * calls and "Canceled because main api changed" errors.
+ */
+let trackerGenerationInProgress = false;
+
+/**
  * Generates a new tracker for a given message number.
  * @param {number} mesNum - The message number.
  * @param {string} includedFields - Which fields to include in the tracker.
  * @returns {object|null} The new tracker object or null if failed.
  */
 export async function generateTracker(mesNum, includedFields = FIELD_INCLUDE_OPTIONS.DYNAMIC) {
+	// Guard: reject concurrent calls at the lowest level
+	if (trackerGenerationInProgress) {
+		debug("generateTracker called while another generation is in progress — skipping");
+		return null;
+	}
+
 	if (mesNum == null || mesNum < 0 || chat[mesNum].extra?.isSmallSys) return null;
 
-	const ctx = getContext();
-	const presetManager = ctx.getPresetManager();
-	const connectionManagerSettings = ctx.extensionSettings.connectionManager;
-	const preselectedPreset = presetManager.getSelectedPresetName();
-	const preselectedProfile = connectionManagerSettings.profiles.find(x => x.id === connectionManagerSettings.selectedProfile).name;
-
+	trackerGenerationInProgress = true;
+	console.warn("[Tracker DIAG] generateTracker STARTING API CALL | mesNum=" + mesNum + " | includedFields=" + includedFields + " | messageName=" + (chat[mesNum]?.name) + " | is_user=" + (chat[mesNum]?.is_user) + " | stack=" + new Error().stack.split('\\n')[2]?.trim());
 	try {
-		await changeProfileAndCompletionPreset(extensionSettings.selectedProfile, extensionSettings.selectedCompletionPreset);
-		let tracker;
+		const ctx = getContext();
+		const presetManager = ctx.getPresetManager();
+		const connectionManagerSettings = ctx.extensionSettings.connectionManager;
+		const preselectedPreset = presetManager.getSelectedPresetName();
+		const preselectedProfile = connectionManagerSettings.profiles.find(x => x.id === connectionManagerSettings.selectedProfile).name;
 
-		if (extensionSettings.generationMode == generationModes.TWO_STAGE) tracker = await generateTwoStageTracker(mesNum, includedFields);
-		else tracker = await generateSingleStageTracker(mesNum, includedFields);
+		try {
+			await changeProfileAndCompletionPreset(extensionSettings.selectedProfile, extensionSettings.selectedCompletionPreset);
+			let tracker;
 
-		await changeProfileAndCompletionPreset(preselectedProfile, preselectedPreset);
+			if (extensionSettings.generationMode == generationModes.TWO_STAGE) tracker = await generateTwoStageTracker(mesNum, includedFields);
+			else tracker = await generateSingleStageTracker(mesNum, includedFields);
 
-		if (!tracker) return null;
+			await changeProfileAndCompletionPreset(preselectedProfile, preselectedPreset);
 
-		const lastMesWithTrackerIndex = getLastMessageWithTracker(mesNum);
-		const lastMesWithTracker = chat[lastMesWithTrackerIndex];
-		let lastTracker = lastMesWithTracker ? lastMesWithTracker.tracker : getDefaultTracker(extensionSettings.trackerDef, FIELD_INCLUDE_OPTIONS.ALL, OUTPUT_FORMATS.JSON);
-		return updateTracker(lastTracker, tracker, extensionSettings.trackerDef, FIELD_INCLUDE_OPTIONS.ALL, OUTPUT_FORMATS.JSON, true);
-	} catch (e) {
-		error("Failed to generate tracker", e);
-		toastr.error("Failed to generate tracker. Make sure your selected connection profile and completion preset are valid and working");
-		await changeProfileAndCompletionPreset(preselectedProfile, preselectedPreset);
+			if (!tracker) return null;
+
+			const lastMesWithTrackerIndex = getLastMessageWithTracker(mesNum);
+			const lastMesWithTracker = chat[lastMesWithTrackerIndex];
+			let lastTracker = lastMesWithTracker ? lastMesWithTracker.tracker : getDefaultTracker(extensionSettings.trackerDef, FIELD_INCLUDE_OPTIONS.ALL, OUTPUT_FORMATS.JSON);
+			return updateTracker(lastTracker, tracker, extensionSettings.trackerDef, FIELD_INCLUDE_OPTIONS.ALL, OUTPUT_FORMATS.JSON, true);
+		} catch (e) {
+			error("Failed to generate tracker", e);
+			toastr.error("Failed to generate tracker. Make sure your selected connection profile and completion preset are valid and working");
+			await changeProfileAndCompletionPreset(preselectedProfile, preselectedPreset);
+		}
+	} finally {
+		trackerGenerationInProgress = false;
 	}
 }
 

@@ -84,11 +84,12 @@ function isChatLoading() {
 async function onGenerateAfterCommands(type, options, dryRun) {
 	if(!extensionSettings.enabled) await clearInjects();
 	const enabled = await isEnabled();
-	if (!enabled || chat.length == 0 || isChatLoading() || (selected_group && !is_group_generating) || (typeof type != "undefined" && !["normal","continue", "swipe", "regenerate", "impersonate", "group_chat"].includes(type))) {
-		debug("GENERATION_AFTER_COMMANDS Tracker skipped", {extenstionEnabled: extensionSettings.enabled, freeToRun: enabled, selected_group, is_group_generating, type, loadingEpoch, chatGenerationEpoch});
+	if (!enabled || chat.length == 0 || dryRun || isChatLoading() || (selected_group && !is_group_generating) || (typeof type != "undefined" && !["normal","continue", "swipe", "regenerate", "impersonate", "group_chat"].includes(type))) {
+		debug("GENERATION_AFTER_COMMANDS Tracker skipped", {extenstionEnabled: extensionSettings.enabled, freeToRun: enabled, selected_group, is_group_generating, type, dryRun, loadingEpoch, chatGenerationEpoch});
 		return;
 	}
 	if(type == "normal") type = undefined;
+	console.warn("[Tracker DIAG] GENERATION_AFTER_COMMANDS proceeding -> prepareMessageGeneration | type=" + type + " | stack=" + new Error().stack.split('\\n')[2]?.trim());
 	log("GENERATION_AFTER_COMMANDS ", [type, options, dryRun]);
 	await prepareMessageGeneration(type, options, dryRun);
 	releaseGeneration();
@@ -131,18 +132,12 @@ async function onCharacterMessageRendered(mesId) {
 		loadingEpoch = 0;
 	}
 	
-	// Skip generation during chat loading window OR for historical messages
-	if (isChatLoading() || mesId < lastChatLengthAtLoad) {
-		log("CHARACTER_MESSAGE_RENDERED (skip generation)");
-		await addTrackerToMessage(mesId, true);
-		releaseGeneration();
-		updateTrackerInterface();
-		return;
-	}
-	
-	// New messages during conversation proceed normally with generation
+	// Always skip generation in render handlers — generation is orchestrated
+	// exclusively by GENERATION_AFTER_COMMANDS. Render handlers only SAVE
+	// trackers that were already prepared (matched by tempTrackerId).
+	console.warn("[Tracker DIAG] CHARACTER_MESSAGE_RENDERED -> addTrackerToMessage(skipGen=TRUE) | mesId=" + mesId + " | is_user=" + (chat[mesId]?.is_user) + " | hasTracker=" + !!(chat[mesId]?.tracker && Object.keys(chat[mesId]?.tracker).length !== 0));
 	log("CHARACTER_MESSAGE_RENDERED");
-	await addTrackerToMessage(mesId);
+	await addTrackerToMessage(mesId, true);
 	releaseGeneration();
 	updateTrackerInterface();
 }
@@ -162,18 +157,12 @@ async function onUserMessageRendered(mesId) {
 		loadingEpoch = 0;
 	}
 	
-	// Skip generation during chat loading window OR for historical messages
-	if (isChatLoading() || mesId < lastChatLengthAtLoad) {
-		log("USER_MESSAGE_RENDERED (skip generation)");
-		await addTrackerToMessage(mesId, true);
-		releaseGeneration();
-		updateTrackerInterface();
-		return;
-	}
-	
-	// New messages during conversation proceed normally with generation
+	// Always skip generation in render handlers — generation is orchestrated
+	// exclusively by GENERATION_AFTER_COMMANDS. Render handlers only SAVE
+	// trackers that were already prepared (matched by tempTrackerId).
+	console.warn("[Tracker DIAG] USER_MESSAGE_RENDERED -> addTrackerToMessage(skipGen=TRUE) | mesId=" + mesId + " | is_user=" + (chat[mesId]?.is_user) + " | hasTracker=" + !!(chat[mesId]?.tracker && Object.keys(chat[mesId]?.tracker).length !== 0));
 	log("USER_MESSAGE_RENDERED");
-	await addTrackerToMessage(mesId);
+	await addTrackerToMessage(mesId, true);
 	releaseGeneration();
 	updateTrackerInterface();
 }

@@ -303,14 +303,6 @@ async function handleStagedGeneration(type, options, dryRun) {
 
 	if ([ACTION_TYPES.CONTINUE, ACTION_TYPES.SWIPE, ACTION_TYPES.REGENERATE].includes(type)) {
 		const hasTracker = trackerExists(lastMes.tracker, extensionSettings.trackerDef);
-		if (!hasTracker && shouldGenerateTracker(mesId, type)) {
-			const previousMesId = getPreviousNonSystemMessageIndex(mesId);
-			lastMes.tracker = await generateTracker(previousMesId);
-			if (type !== ACTION_TYPES.REGENERATE) {
-				await saveChatConditional();
-				TrackerPreviewManager.updatePreview(mesId);
-			}
-		}
 
 		if (type === ACTION_TYPES.REGENERATE && hasTracker) {
 			chat_metadata.tracker.tempTrackerId = mesId;
@@ -327,6 +319,7 @@ async function handleStagedGeneration(type, options, dryRun) {
 			chat_metadata.tracker.cmdTrackerOverride = null;
 		} else if (shouldGenerateTracker(mesId + 1, type)) {
 			debug("Generating new tracker for message:", mesId);
+			console.warn("[Tracker DIAG] handleStagedGeneration -> generateTracker (NORMAL path) | type=" + type + " | mesId=" + mesId + " | generating for next message (mesId+1)");
 			tracker = await generateTracker(mesId);
 		} else if (shouldShowPopup(mesId + 1, type)) {
 			const manualTracker = await showManualTrackerPopup(mesId + 1);
@@ -461,6 +454,7 @@ export async function addTrackerToMessage(mesId, skipGeneration = false) {
 			const previousMesId = getPreviousNonSystemMessageIndex(mesId);
 			if (previousMesId !== -1 && shouldGenerateTracker(mesId, undefined)) {
 				debug("Generating for message with missing tracker:", mesId);
+				console.warn("[Tracker DIAG] addTrackerToMessage -> generateTracker (FALLTHROUGH: no tempTracker, skipGen=false) | mesId=" + mesId + " | previousMesId=" + previousMesId + " | tempTrackerId=" + (chat_metadata?.tracker?.tempTrackerId ?? "null") + " | is_user=" + (chat[mesId]?.is_user));
 				const tracker = await generateTracker(previousMesId);
 				await saveTrackerToMessage(mesId, tracker);
 			}
