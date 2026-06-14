@@ -319,7 +319,6 @@ async function handleStagedGeneration(type, options, dryRun) {
 			chat_metadata.tracker.cmdTrackerOverride = null;
 		} else if (shouldGenerateTracker(mesId + 1, type)) {
 			debug("Generating new tracker for message:", mesId);
-			console.warn("[Tracker DIAG] handleStagedGeneration -> generateTracker (NORMAL path) | type=" + type + " | mesId=" + mesId + " | generating for next message (mesId+1)");
 			tracker = await generateTracker(mesId);
 		} else if (shouldShowPopup(mesId + 1, type)) {
 			const manualTracker = await showManualTrackerPopup(mesId + 1);
@@ -451,12 +450,20 @@ export async function addTrackerToMessage(mesId, skipGeneration = false) {
 				await saveTrackerToMessage(mesId, tracker);
 			}
 		} else if (!skipGeneration) {
+			// FALLTHROUGH SAFETY:
+			// Tracker generation is orchestrated in exactly ONE place — the
+			// GENERATION_AFTER_COMMANDS handler, which prepares a tracker and tags it
+			// with tempTrackerId so the render handler above can save it. If we reach
+			// here it means a message rendered with no prepared tracker waiting for it.
+			//
+			// The original code would fire a brand-new generateTracker() right here.
+			// That was a second, independent generation path that competed with the
+			// main one and was a source of surprise ("random") API calls. We no longer
+			// generate from this path; we only log it. If you ever want to backfill a
+			// missing tracker, do it explicitly via the /generate-tracker slash command.
 			const previousMesId = getPreviousNonSystemMessageIndex(mesId);
 			if (previousMesId !== -1 && shouldGenerateTracker(mesId, undefined)) {
-				debug("Generating for message with missing tracker:", mesId);
-				console.warn("[Tracker DIAG] addTrackerToMessage -> generateTracker (FALLTHROUGH: no tempTracker, skipGen=false) | mesId=" + mesId + " | previousMesId=" + previousMesId + " | tempTrackerId=" + (chat_metadata?.tracker?.tempTrackerId ?? "null") + " | is_user=" + (chat[mesId]?.is_user));
-				const tracker = await generateTracker(previousMesId);
-				await saveTrackerToMessage(mesId, tracker);
+				debug("Message rendered with no prepared tracker — skipping auto-generation (use /generate-tracker to backfill).", { mesId, previousMesId });
 			}
 		}
 	}

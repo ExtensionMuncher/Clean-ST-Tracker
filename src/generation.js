@@ -1,4 +1,4 @@
-import { generateRaw, chat, characters, this_chid, getCharacterCardFields, name1 } from "../../../../../script.js";
+import { chat, characters, this_chid, getCharacterCardFields, name1 } from "../../../../../script.js";
 import { getContext } from '../../../../../../scripts/extensions.js';
 
 import { groups, selected_group } from "../../../../../scripts/group-chats.js";
@@ -6,6 +6,7 @@ import { log, warn, debug, error, unescapeJsonString, getLastMessageWithTracker 
 import { yamlToJSON } from "../lib/ymlParser.js";
 import { extensionSettings } from "../index.js";
 import { generationModes } from "./settings/settings.js";
+import { sendBackgroundTrackerRequest } from "./backgroundRequest.js";
 import { FIELD_INCLUDE_OPTIONS, getDefaultTracker, getExampleTrackers as getExampleTrackersFromDef, getTracker, getTrackerPrompt, OUTPUT_FORMATS, updateTracker } from "./trackerDataHandler.js";
 import { trackerFormat } from "./settings/defaultSettings.js";
 
@@ -47,92 +48,54 @@ function conditionalSection(template, sectionName, condition, content) {
 // #endregion
 
 /**
- * A helper function to introduce a delay.
- * @param {number} ms - The delay in milliseconds.
- * @returns {Promise<void>}
- */
-const delay = ms => new Promise(res => setTimeout(res, ms));
-
-/**
- * Overrides the current connection profile and completion preset if they are not set to "current".
- * @param {string} profileName - The connection profile name.
- * @param {string} completionPresetName - The completion preset name.
- * @returns {Promise<null>}
- */
-async function changeProfileAndCompletionPreset(profileName, completionPresetName) {
-    const ctx = getContext();
-    let profileSwitched = false;
-
-    if (extensionSettings.selectedProfile !== "current") {
-        debug("changing connection profile to", profileName);
-        await ctx.executeSlashCommandsWithOptions(`/profile ${profileName}`);
-        profileSwitched = true;
-    }
-
-    if (extensionSettings.selectedCompletionPreset !== "current") {
-        debug("changing completion preset to", completionPresetName);
-        await ctx.executeSlashCommandsWithOptions(`/preset ${completionPresetName}`);
-    }
-
-    if (profileSwitched) {
-        debug("Delaying for 2000ms after profile switch to ensure connection is ready.");
-        await delay(2000);
-    }
-}
-
-/**
- * Guards against concurrent generateTracker() calls.
- * Prevents the cascade where concurrent calls race through
- * changeProfileAndCompletionPreset() (which executes /profile <name>,
- * aborting any in-flight API request), causing rapid-fire API
- * calls and "Canceled because main api changed" errors.
+ * Single interlock guarding against overlapping generateTracker() calls.
+ *
+ * With the background-request approach there is no profile switching to cause
+ * the old "Canceled because main api changed" cascade, but we still only ever
+ * want ONE tracker generation in flight at a time: a second concurrent call
+ * would waste tokens and could write a stale result. If a call arrives while
+ * one is running, we skip it. (Superseding an older request when a genuinely
+ * newer one is needed is handled inside backgroundRequest.js via AbortController.)
  */
 let trackerGenerationInProgress = false;
 
 /**
  * Generates a new tracker for a given message number.
+ *
+ * This no longer switches your active SillyTavern connection profile. Instead it
+ * sends the request quietly through the profile chosen in Tracker settings using
+ * ConnectionManagerRequestService, so your chat's own generation is never disturbed.
+ *
  * @param {number} mesNum - The message number.
  * @param {string} includedFields - Which fields to include in the tracker.
  * @returns {object|null} The new tracker object or null if failed.
  */
 export async function generateTracker(mesNum, includedFields = FIELD_INCLUDE_OPTIONS.DYNAMIC) {
-	// Guard: reject concurrent calls at the lowest level
+	// Guard: reject overlapping calls.
 	if (trackerGenerationInProgress) {
 		debug("generateTracker called while another generation is in progress — skipping");
 		return null;
 	}
 
-	if (mesNum == null || mesNum < 0 || chat[mesNum].extra?.isSmallSys) return null;
+	if (mesNum == null || mesNum < 0 || chat[mesNum]?.extra?.isSmallSys) return null;
 
 	trackerGenerationInProgress = true;
-	console.warn("[Tracker DIAG] generateTracker STARTING API CALL | mesNum=" + mesNum + " | includedFields=" + includedFields + " | messageName=" + (chat[mesNum]?.name) + " | is_user=" + (chat[mesNum]?.is_user) + " | stack=" + new Error().stack.split('\\n')[2]?.trim());
 	try {
-		const ctx = getContext();
-		const presetManager = ctx.getPresetManager();
-		const connectionManagerSettings = ctx.extensionSettings.connectionManager;
-		const preselectedPreset = presetManager.getSelectedPresetName();
-		const preselectedProfile = connectionManagerSettings.profiles.find(x => x.id === connectionManagerSettings.selectedProfile).name;
+		let tracker;
 
-		try {
-			await changeProfileAndCompletionPreset(extensionSettings.selectedProfile, extensionSettings.selectedCompletionPreset);
-			let tracker;
+		if (extensionSettings.generationMode == generationModes.TWO_STAGE) tracker = await generateTwoStageTracker(mesNum, includedFields);
+		else tracker = await generateSingleStageTracker(mesNum, includedFields);
 
-			if (extensionSettings.generationMode == generationModes.TWO_STAGE) tracker = await generateTwoStageTracker(mesNum, includedFields);
-			else tracker = await generateSingleStageTracker(mesNum, includedFields);
+		if (!tracker) return null;
 
-			await changeProfileAndCompletionPreset(preselectedProfile, preselectedPreset);
-
-			if (!tracker) return null;
-
-			const lastMesWithTrackerIndex = getLastMessageWithTracker(mesNum);
-			const lastMesWithTracker = chat[lastMesWithTrackerIndex];
-			let lastTracker = lastMesWithTracker ? lastMesWithTracker.tracker : getDefaultTracker(extensionSettings.trackerDef, FIELD_INCLUDE_OPTIONS.ALL, OUTPUT_FORMATS.JSON);
-			return updateTracker(lastTracker, tracker, extensionSettings.trackerDef, FIELD_INCLUDE_OPTIONS.ALL, OUTPUT_FORMATS.JSON, true);
-		} catch (e) {
-			error("Failed to generate tracker", e);
-			toastr.error("Failed to generate tracker. Make sure your selected connection profile and completion preset are valid and working");
-			await changeProfileAndCompletionPreset(preselectedProfile, preselectedPreset);
-		}
+		const lastMesWithTrackerIndex = getLastMessageWithTracker(mesNum);
+		const lastMesWithTracker = chat[lastMesWithTrackerIndex];
+		let lastTracker = lastMesWithTracker ? lastMesWithTracker.tracker : getDefaultTracker(extensionSettings.trackerDef, FIELD_INCLUDE_OPTIONS.ALL, OUTPUT_FORMATS.JSON);
+		return updateTracker(lastTracker, tracker, extensionSettings.trackerDef, FIELD_INCLUDE_OPTIONS.ALL, OUTPUT_FORMATS.JSON, true);
+	} catch (e) {
+		error("Failed to generate tracker", e);
+		toastr.error("Failed to generate tracker. Check that your selected Tracker connection profile is valid and that Connection Manager is enabled.");
+		return null;
 	} finally {
 		trackerGenerationInProgress = false;
 	}
@@ -173,7 +136,7 @@ async function generateTwoStageTracker(mesNum, includedFields) {
 	let responseLength = extensionSettings.responseLength > 0 ? extensionSettings.responseLength : null;
 
 	// Run the summarization stage to get the firstStageMessage
-	const message = await generateRaw(requestPrompt, null, false, false, systemPrompt, responseLength);
+	const message = await sendBackgroundTrackerRequest(systemPrompt, requestPrompt, responseLength);
 	debug("Message Summarized:", { message });
 
 	// Generate tracker using the AI model in single-stage manner but with the first stage message
@@ -189,7 +152,7 @@ async function generateTwoStageTracker(mesNum, includedFields) {
  * @param {number|null} responseLength
  */
 async function sendGenerateTrackerRequest(systemPrompt, requestPrompt, responseLength) {
-	let tracker = await generateRaw(requestPrompt, null, false, false, systemPrompt, responseLength);
+	let tracker = await sendBackgroundTrackerRequest(systemPrompt, requestPrompt, responseLength);
 	debug("Generated tracker:", { tracker });
 
 	let newTracker;

@@ -4,6 +4,7 @@ import { debug, getLastMessageWithTracker, getLastNonSystemMessageIndex, log } f
 import { isEnabled } from "./settings/settings.js";
 import { prepareMessageGeneration, addTrackerToMessage, clearInjects } from "./tracker.js";
 import { releaseGeneration } from "../lib/interconnection.js";
+import { abortBackgroundRequest } from "./backgroundRequest.js";
 import { FIELD_INCLUDE_OPTIONS, getTracker, OUTPUT_FORMATS, saveTracker } from "./trackerDataHandler.js";
 import { TrackerInterface } from "./ui/trackerInterface.js";
 import { extensionSettings } from "../index.js";
@@ -45,6 +46,10 @@ const CHAT_LOAD_TIMEOUT_MS = 30000;
  * @param {object} args - The event arguments.
  */
 async function onChatChanged(args) {
+	// A new chat (or chat switch) means any tracker request still running was for
+	// the OLD chat — abort it so its result can't land on this one.
+	abortBackgroundRequest();
+
 	chatGenerationEpoch++;
 	const startedEpoch = chatGenerationEpoch;
 	loadingEpoch = startedEpoch;
@@ -89,7 +94,6 @@ async function onGenerateAfterCommands(type, options, dryRun) {
 		return;
 	}
 	if(type == "normal") type = undefined;
-	console.warn("[Tracker DIAG] GENERATION_AFTER_COMMANDS proceeding -> prepareMessageGeneration | type=" + type + " | stack=" + new Error().stack.split('\\n')[2]?.trim());
 	log("GENERATION_AFTER_COMMANDS ", [type, options, dryRun]);
 	await prepareMessageGeneration(type, options, dryRun);
 	releaseGeneration();
@@ -135,7 +139,6 @@ async function onCharacterMessageRendered(mesId) {
 	// Always skip generation in render handlers — generation is orchestrated
 	// exclusively by GENERATION_AFTER_COMMANDS. Render handlers only SAVE
 	// trackers that were already prepared (matched by tempTrackerId).
-	console.warn("[Tracker DIAG] CHARACTER_MESSAGE_RENDERED -> addTrackerToMessage(skipGen=TRUE) | mesId=" + mesId + " | is_user=" + (chat[mesId]?.is_user) + " | hasTracker=" + !!(chat[mesId]?.tracker && Object.keys(chat[mesId]?.tracker).length !== 0));
 	log("CHARACTER_MESSAGE_RENDERED");
 	await addTrackerToMessage(mesId, true);
 	releaseGeneration();
@@ -160,7 +163,6 @@ async function onUserMessageRendered(mesId) {
 	// Always skip generation in render handlers — generation is orchestrated
 	// exclusively by GENERATION_AFTER_COMMANDS. Render handlers only SAVE
 	// trackers that were already prepared (matched by tempTrackerId).
-	console.warn("[Tracker DIAG] USER_MESSAGE_RENDERED -> addTrackerToMessage(skipGen=TRUE) | mesId=" + mesId + " | is_user=" + (chat[mesId]?.is_user) + " | hasTracker=" + !!(chat[mesId]?.tracker && Object.keys(chat[mesId]?.tracker).length !== 0));
 	log("USER_MESSAGE_RENDERED");
 	await addTrackerToMessage(mesId, true);
 	releaseGeneration();
