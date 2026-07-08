@@ -1,8 +1,9 @@
-import { chat } from "../../../../../script.js";
+import { chat, saveChatConditional } from "../../../../../script.js";
 import { selected_group, is_group_generating } from "../../../../../scripts/group-chats.js";
-import { debug, getLastMessageWithTracker, getLastNonSystemMessageIndex, log } from "../lib/utils.js";
+import { debug, getLastMessageWithTracker, getLastNonSystemMessageIndex, getPreviousNonSystemMessageIndex, shouldGenerateTracker, log } from "../lib/utils.js";
 import { isEnabled } from "./settings/settings.js";
 import { prepareMessageGeneration, addTrackerToMessage, clearInjects } from "./tracker.js";
+import { generateTracker } from "./generation.js";
 import { releaseGeneration } from "../lib/interconnection.js";
 import { abortBackgroundRequest } from "./backgroundRequest.js";
 import { FIELD_INCLUDE_OPTIONS, getTracker, OUTPUT_FORMATS, saveTracker } from "./trackerDataHandler.js";
@@ -37,6 +38,19 @@ let loadingEpoch = 0;
 let lastChatLengthAtLoad = 0;
 
 const CHAT_LOAD_TIMEOUT_MS = 30000;
+
+/**
+ * Event handler for when a message is deleted. Deleting a message can leave a
+ * tracker request that was started for the now-removed turn still in flight;
+ * aborting it here stops that stale result from landing on the wrong message.
+ *
+ * Note: this does NOT stop the "connection profile switched too quickly" toast —
+ * that is a cross-extension profile collision and is not addressed here.
+ */
+async function onMessageDeleted(mesId) {
+	log("MESSAGE_DELETED", mesId);
+	abortBackgroundRequest();
+}
 
 /**
  * Event handler for when the chat changes.
@@ -89,7 +103,24 @@ function isChatLoading() {
 async function onGenerateAfterCommands(type, options, dryRun) {
 	if(!extensionSettings.enabled) await clearInjects();
 	const enabled = await isEnabled();
-	if (!enabled || chat.length == 0 || dryRun || isChatLoading() || (selected_group && !is_group_generating) || (typeof type != "undefined" && !["normal","continue", "swipe", "regenerate", "impersonate", "group_chat"].includes(type))) {
+
+	// Only generate a tracker on a GENUINE NEW TURN. We explicitly exclude:
+	//   • swipe / regenerate — these re-roll an EXISTING message (e.g. after you
+	//     delete a reply and ST regenerates). A new tracker here is the "random
+	//     API call after deleting a message" you saw — so it's blocked.
+	//   • impersonate — ST writes a message AS YOU, not a real character turn.
+	// Allowed: undefined/normal (a new reply) and continue (extends the last
+	// message with genuinely new narrative content).
+	const ALLOWED_TYPES = ["normal", "continue", "group_chat"];
+
+	if (
+		!enabled ||
+		chat.length == 0 ||
+		dryRun ||
+		isChatLoading() ||
+		(selected_group && !is_group_generating) ||
+		(typeof type != "undefined" && !ALLOWED_TYPES.includes(type))
+	) {
 		debug("GENERATION_AFTER_COMMANDS Tracker skipped", {extenstionEnabled: extensionSettings.enabled, freeToRun: enabled, selected_group, is_group_generating, type, dryRun, loadingEpoch, chatGenerationEpoch});
 		return;
 	}
@@ -153,18 +184,51 @@ async function onCharacterMessageRendered(mesId) {
  */
 async function onUserMessageRendered(mesId) {
 	if (!await isEnabled() || !chat[mesId] || (chat[mesId].tracker && Object.keys(chat[mesId].tracker).length !== 0)) return;
-	
+
+	// Determine whether this is a genuinely NEW message (not a chat-load or
+	// historical re-render) BEFORE we clear the loading flag below. Only new
+	// messages are eligible for auto-generation; historical renders must never
+	// fire an API call (that was the "random API call on load" class of bug).
+	const isNewMessage = !(loadingEpoch > 0 && mesId < lastChatLengthAtLoad);
+
 	// Clear loading flag when a genuinely new message is rendered (not historical)
 	if (loadingEpoch > 0 && mesId >= lastChatLengthAtLoad) {
 		debug("New message detected, clearing chat loading flag");
 		loadingEpoch = 0;
 	}
-	
-	// Always skip generation in render handlers — generation is orchestrated
-	// exclusively by GENERATION_AFTER_COMMANDS. Render handlers only SAVE
-	// trackers that were already prepared (matched by tempTrackerId).
+
 	log("USER_MESSAGE_RENDERED");
+
+	// First, save any tracker that was already prepared for this id (unchanged
+	// behavior — covers the cases where GENERATION_AFTER_COMMANDS staged one).
 	await addTrackerToMessage(mesId, true);
+
+	// If the user message STILL has no tracker, the staged path didn't prepare
+	// one for it — the auto-path only ever tags the upcoming AI message (mesId+1),
+	// so with target = USER/BOTH the user's own message never auto-generated.
+	// Generate it here, but ONLY when: it's a genuinely new message, the chat
+	// isn't loading, and target settings say the user message should be tracked.
+	// shouldGenerateTracker reads message.is_user and the BOTH/USER target, so it
+	// returns false for CHARACTER-only and for historical/system messages.
+	const stillHasNoTracker = !(chat[mesId]?.tracker && Object.keys(chat[mesId].tracker).length !== 0);
+	if (isNewMessage && stillHasNoTracker && shouldGenerateTracker(mesId, undefined)) {
+		try {
+			debug("User message has no prepared tracker — auto-generating for user message", { mesId });
+			// Generate the tracker for THIS user message (mesId), the same anchor
+			// the staged path uses via generateTracker(). generateTracker reads the
+			// context up to the given message, so passing mesId produces the tracker
+			// that belongs on the user's own message.
+			const tracker = await generateTracker(mesId, FIELD_INCLUDE_OPTIONS.DYNAMIC);
+			if (tracker) {
+				chat[mesId].tracker = tracker;
+				await saveChatConditional();
+				TrackerPreviewManager.updatePreview(mesId);
+			}
+		} catch (e) {
+			debug("User-message tracker auto-generation failed (non-fatal)", e);
+		}
+	}
+
 	releaseGeneration();
 	updateTrackerInterface();
 }
@@ -180,6 +244,7 @@ export const eventHandlers = {
 	onMessageSent,
 	onCharacterMessageRendered,
 	onUserMessageRendered,
+	onMessageDeleted,
 	generateAfterCombinePrompts
 };
 

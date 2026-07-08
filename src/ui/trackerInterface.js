@@ -227,7 +227,9 @@ export class TrackerInterface {
                 </div>
             </div>
         `);
-        $("#extensionsMenu").append(trackerInterfaceButton);
+        if ($("#tracker_ui_container").length === 0) {
+            $("#extensionsMenu").append(trackerInterfaceButton);
+        }
 
         // Tracker UI button event
         $("#tracker-ui-item").on("click", () => {
@@ -243,11 +245,15 @@ export class TrackerInterface {
             trackerInterface.show();
         });
 
-        // Add tracker button to message template
+        // Add tracker button to message template (guard against double-insertion:
+        // if initializeTrackerButtons runs more than once, prepending again would
+        // produce duplicate buttons on every message).
         const showMessageTrackerButton = $(`
             <div title="Show Message Tracker" class="mes_button mes_tracker_button fa-solid fa-code interactable" tabindex="0"></div>
         `);
-        $("#message_template .mes_buttons .extraMesButtons").prepend(showMessageTrackerButton);
+        if ($("#message_template .mes_buttons .extraMesButtons .mes_tracker_button").length === 0) {
+            $("#message_template .mes_buttons .extraMesButtons").prepend(showMessageTrackerButton);
+        }
 
         // Message tracker button event
         $(document).on("click", ".mes_tracker_button", function () {

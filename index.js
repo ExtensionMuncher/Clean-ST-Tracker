@@ -40,6 +40,7 @@ eventSource.on(event_types.CHAT_CHANGED, eventHandlers.onChatChanged);
 eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, eventHandlers.onCharacterMessageRendered);
 eventSource.on(event_types.USER_MESSAGE_RENDERED, eventHandlers.onUserMessageRendered);
 eventSource.on(event_types.GENERATION_AFTER_COMMANDS, eventHandlers.onGenerateAfterCommands);
+eventSource.on(event_types.MESSAGE_DELETED, eventHandlers.onMessageDeleted);
 eventSource.on(event_types.GENERATE_AFTER_COMBINE_PROMPTS, eventHandlers.generateAfterCombinePrompts);
 
 

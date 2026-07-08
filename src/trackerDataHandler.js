@@ -39,7 +39,25 @@ const FIELD_TYPES_HANDLERS = {
  * @param {string} mesId - The message ID used to locate the original tracker in the chat object.
  */
 export function saveTracker(tracker, backendObj, mesId, useUpdatedExtraFieldsAsSource = false) {
-	const originalTracker = getTracker(chat[mesId].tracker, backendObj, FIELD_INCLUDE_OPTIONS.ALL, true, OUTPUT_FORMATS.JSON);
+	// If the message has no existing tracker (e.g. it was cleared, or this is the
+	// first tracker for the message), there is nothing to reconcile against.
+	// Reconciling would pass a null "original" into reconcileUpdatedTracker and
+	// crash on tracker[fieldName] (the "Cannot read properties of null (reading
+	// 'Time')" error seen when regenerating after editing a previous preview).
+	// In that case, normalize the incoming data through getTracker and save it
+	// directly as the new tracker.
+	const existing = chat[mesId]?.tracker;
+	const hasExisting = existing && typeof existing === "object" && Object.keys(existing).length > 0;
+
+	if (!hasExisting) {
+		const normalized = getTracker(tracker, backendObj, FIELD_INCLUDE_OPTIONS.ALL, true, OUTPUT_FORMATS.JSON);
+		chat[mesId].tracker = normalized;
+		saveChatDebounced();
+		TrackerPreviewManager.updatePreview(mesId);
+		return normalized;
+	}
+
+	const originalTracker = getTracker(existing, backendObj, FIELD_INCLUDE_OPTIONS.ALL, true, OUTPUT_FORMATS.JSON);
 	const updatedTracker = updateTracker(originalTracker, tracker, backendObj, true, OUTPUT_FORMATS.JSON, useUpdatedExtraFieldsAsSource);
 	chat[mesId].tracker = updatedTracker;
 
@@ -250,6 +268,11 @@ function processFieldDefaults(backendObj, trackerObj, includeFields) {
 }
 
 function reconcileTracker(trackerInput, backendObj, reconciledObj, extraFields, includeFields) {
+	// Guard: trackerInput can be null (regeneration can yield a null tracker, and
+	// getTracker is called on possibly-empty message trackers). Reading
+	// trackerInput[fieldName] on null throws "Cannot read properties of null".
+	// Treat a missing input as empty so fields resolve to their defaults.
+	if (!trackerInput || typeof trackerInput !== "object") trackerInput = {};
 	for (const field of Object.values(backendObj)) {
 		if (!shouldIncludeField(field, includeFields)) continue;
 
@@ -273,6 +296,13 @@ function reconcileTracker(trackerInput, backendObj, reconciledObj, extraFields, 
 }
 
 function reconcileUpdatedTracker(tracker, updatedTracker, backendObj, finalTracker, extraFields, fieldPath = "", includeUnmatchedFields, useUpdatedExtraFieldsAsSource = false) {
+	// Guard against a null/undefined original tracker. Callers (e.g. regenerating
+	// after a preview edit, or when the previous message's tracker is empty) can
+	// pass null here; reading tracker[fieldName] on null throws
+	// "Cannot read properties of null (reading 'Time')". Treat a missing original
+	// as an empty object so the updated values are used as-is.
+	if (!tracker || typeof tracker !== "object") tracker = {};
+	if (!updatedTracker || typeof updatedTracker !== "object") updatedTracker = {};
 	for (const field of Object.values(backendObj)) {
 		const fieldName = field.name;
 		const handler = FIELD_TYPES_HANDLERS[field.type] || handleString;
